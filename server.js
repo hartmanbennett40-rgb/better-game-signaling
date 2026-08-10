@@ -42,18 +42,28 @@ wss.on('connection', (ws) => {
 
 		switch (msg.type) {
 			case 'host': {
+				// Create a new lobby, this ws becomes the host (always peer id 1).
 				let code = generateLobbyCode();
 				while (lobbies.has(code)) code = generateLobbyCode();
+
 				ws.lobbyCode = code;
 				ws.peerId = 1;
+
+				// Room theme is picked once per lobby, server-side, so it's a
+				// single source of truth every peer (host + joiners) agrees on.
+				const ROOM_THEME_COUNT = 4;
+				const roomTheme = Math.floor(Math.random() * ROOM_THEME_COUNT);
+
 				lobbies.set(code, {
 					host: ws,
 					peers: new Map([[1, ws]]),
 					nextPeerId: 2,
 					maxPlayers: msg.maxPlayers || 8,
 					playerName: msg.playerName || 'Host',
+					roomTheme,
 				});
-				send(ws, { type: 'hosted', code, peerId: 1 });
+
+				send(ws, { type: 'hosted', code, peerId: 1, roomTheme });
 				break;
 			}
 
@@ -82,12 +92,19 @@ wss.on('connection', (ws) => {
 					send(ws, { type: 'join_failed', reason: 'Lobby is full' });
 					return;
 				}
+
 				const newPeerId = lobby.nextPeerId++;
 				ws.lobbyCode = code;
 				ws.peerId = newPeerId;
 				lobby.peers.set(newPeerId, ws);
+
+				// Tell the joiner their assigned ID, the room theme, and who's
+				// already in the lobby.
 				const existingPeerIds = [...lobby.peers.keys()].filter(id => id !== newPeerId);
-				send(ws, { type: 'joined', code, peerId: newPeerId, existingPeers: existingPeerIds });
+				send(ws, { type: 'joined', code, peerId: newPeerId, existingPeers: existingPeerIds, roomTheme: lobby.roomTheme });
+
+				// Tell everyone already in the lobby that a new peer joined,
+				// so they can initiate WebRTC offers to it.
 				for (const [pid, peerWs] of lobby.peers.entries()) {
 					if (pid !== newPeerId) {
 						send(peerWs, { type: 'peer_joined', peerId: newPeerId });
@@ -96,6 +113,8 @@ wss.on('connection', (ws) => {
 				break;
 			}
 
+			// WebRTC handshake relay: forward offer/answer/candidate to a
+			// specific target peer within the same lobby.
 			case 'signal': {
 				const lobby = lobbies.get(ws.lobbyCode);
 				if (!lobby) return;
@@ -125,14 +144,22 @@ function cleanupPeer(ws) {
 	if (!ws.lobbyCode) return;
 	const lobby = lobbies.get(ws.lobbyCode);
 	if (!lobby) return;
+
 	lobby.peers.delete(ws.peerId);
+
 	for (const peerWs of lobby.peers.values()) {
 		send(peerWs, { type: 'peer_left', peerId: ws.peerId });
 	}
+
 	if (ws.peerId === 1 || lobby.peers.size === 0) {
 		lobbies.delete(ws.lobbyCode);
 	}
+
 	ws.lobbyCode = null;
+	ws.peerId = null;
+}
+
+console.log('Signaling server listening on port ' + PORT);
 	ws.peerId = null;
 }
 
